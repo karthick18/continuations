@@ -1,0 +1,3 @@
+Bootstrapping with a continuations example in "C" which can be used to implement async-only single threaded request servers over the age-old poll and multi-threaded dispatch mechanism.
+
+Currently supported for x86_64 and i386 because of the way the closure is implemented which makes it arch. dependent.
