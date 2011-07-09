@@ -11,7 +11,7 @@
  * These principles could be used to create a single threaded async request server.
  */
 
-#ifndef __linux__
+#if !defined( __linux__) && !defined(__APPLE__)
 #error "fuck off as your arch. is not supported"
 #endif
 
@@ -22,6 +22,11 @@
 #include <assert.h>
 #include <pthread.h>
 #include "list.h"
+
+#if defined(__APPLE__)
+#define MAP_32BIT (0)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 
 #if !defined(MAP_32BIT) && !defined(__i386__)
 #error "MAP_32BIT not defined for 64 bit"
