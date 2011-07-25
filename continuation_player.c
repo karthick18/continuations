@@ -73,6 +73,7 @@ static void *continuation_loop(void *unused)
                     cont = (i << 5) + j;
                     if(play_continuation(cont) < 0)
                     {
+                        close_continuation(cont);
                         unmark_continuation(cont);
                     }
                 }
