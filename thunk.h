@@ -59,7 +59,7 @@ struct thunk
 {
     unsigned char push_op;  /* push eax */
     unsigned char mov_op; /* mov $env, eax */
-    struct scope *scope; 
+    void *scope; 
     unsigned char push_op2; /* push eax or arg into the stack */
     unsigned char call_op; /* call */
     int call_offset; /*$offset => function - address_of_call_offset*/

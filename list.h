@@ -78,6 +78,19 @@ static __inline__ void list_splice(struct list_head *src,struct list_head *dst) 
     }
 }
 
+static __inline__ void list_concat(struct list_head *src, struct list_head *dst)
+{
+    if(!LIST_EMPTY(src))
+    {
+        struct list_head *dst_last = dst->prev;
+        dst_last->next = src->next;
+        src->next->prev = dst_last;
+        src->prev->next = dst;
+        dst->prev = src->prev;
+        LIST_HEAD_INIT(src);
+    }
+}
+
 #define list_entry(ptr,cast,field)                                      \
     (cast*) ( (unsigned char*)(ptr) - (unsigned long)(&((cast*)0)->field) )
 

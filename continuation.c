@@ -11,7 +11,7 @@
  * These principles could be used to create a single threaded async request server.
  */
 
-#if !defined( __linux__) && !defined(__APPLE__)
+#if !defined (__linux__) && !defined(__APPLE__)
 #error "fuck off as your arch. is not supported"
 #endif
 
@@ -21,10 +21,19 @@
 #include <sys/mman.h>
 #include <assert.h>
 #include <pthread.h>
+#include <errno.h>
+#include "continuation.h"
 #include "list.h"
+#define _CONTINUATION_C_
+#include "thunk.h"
 
-#if defined(__APPLE__)
+#ifdef __APPLE__
+#ifndef MAP_32BIT
 #define MAP_32BIT (0)
+#endif
+#endif
+
+#ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 
@@ -32,14 +41,7 @@
 #error "MAP_32BIT not defined for 64 bit"
 #endif
 
-#define _CONTINUATION_C_
-
-#include "thunk.h"
-
-struct scope
-{
-    void *args;
-};
+#define CONT_UNWIND (0x2) 
 
 typedef void (*closure_t)(void);
 
@@ -47,7 +49,13 @@ struct continuation
 {
     struct list_head list;
     closure_t thunk;
-    int continuation;
+};
+
+struct continuation_list
+{
+    int flags;
+    struct list_head continuations;
+    struct list_head deferred_continuations;
 };
 
 #define likely(expr) __builtin_expect(!!(expr), 1)
@@ -61,7 +69,7 @@ struct continuation
 
 struct continuation_map
 {
-    struct list_head *continuations;
+    struct continuation_list *continuation_list;
     unsigned int map[CONTINUATION_MAP_WORDS];
 };
 
@@ -69,11 +77,17 @@ static struct continuation_map continuation_map = {
     .map = { [0 ... CONTINUATION_MAP_WORDS-1] = 0 },
 };
 
-static int __cfz(unsigned int *map, int bit)
+static __inline__ int __clear_bit(unsigned int *map, int bit)
 {
     if(unlikely(bit >= CONTINUATION_MAP_BITS)) return -1;
     map[bit >> 5] &= ~(1 << (bit & 31));
     return 0;
+}
+
+static __inline__ int __test_bit(unsigned int *map, int bit)
+{
+    if(unlikely(bit >= CONTINUATION_MAP_BITS)) return 1;
+    return map[bit>>5] & ( 1 << (bit & 31) );
 }
 
 static int __ffz(unsigned int *map, unsigned int size)
@@ -111,31 +125,49 @@ static int __ffz(unsigned int *map, unsigned int size)
     return -1;
 }
 
-static __inline__ void init_continuation_map(void)
+static void __attribute__((constructor)) init_continuation_map(void)
 {
-    register int i;
-    continuation_map.continuations = calloc(CONTINUATION_MAP_BITS, sizeof(*continuation_map.continuations));
-    assert(continuation_map.continuations);
-    for(i = 0; i < CONTINUATION_MAP_BITS; ++i)
-    {
-        LIST_HEAD_INIT(continuation_map.continuations + i);
-    }
+    continuation_map.continuation_list = calloc(CONTINUATION_MAP_BITS, sizeof(*continuation_map.continuation_list));
+    assert(continuation_map.continuation_list);
 }
 
 static int get_continuation(struct continuation_map *map)
 {
-    return __ffz(map->map, sizeof(map->map)/sizeof(map->map[0]));
+    return  __ffz(map->map, sizeof(map->map)/sizeof(map->map[0]));
 }
 
 static int clear_continuation(struct continuation_map *map, int continuation)
 {
-    return __cfz(map->map, continuation);
+    return __clear_bit(map->map, continuation);
 }
 
-static __inline__ struct list_head *get_continuation_queue(int cont)
+static __inline__ struct continuation_list *get_continuation_queue(struct continuation_map *map, int cont)
 {
     if(unlikely(cont >= CONTINUATION_MAP_BITS)) return NULL;
-    return continuation_map.continuations + cont;
+    return map->continuation_list + cont;
+}
+
+/*
+ * Take it from the recycle or reclaim list if any.
+ */
+static struct thunk *reclaim_list;
+
+static void *alloc_closure(void)
+{
+    struct thunk *thunk = (struct thunk *)reclaim_list;
+    if(thunk)
+    {
+        reclaim_list = *(struct thunk **)thunk;
+        --thunk;
+    }
+    else
+    {
+        thunk = (struct thunk*)mmap(0, sizeof(*thunk) + sizeof(thunk), PROT_READ | PROT_WRITE | PROT_EXEC,
+                                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+        if(thunk == MAP_FAILED)
+            thunk = NULL;
+    }
+    return (void *)thunk;
 }
 
 /*
@@ -143,35 +175,21 @@ static __inline__ struct list_head *get_continuation_queue(int cont)
  */
 static closure_t make_closure(void *block, void *arg)
 {
-    struct thunk *thunk = (struct thunk *)mmap(0, sizeof(*thunk) + sizeof(thunk), PROT_READ | PROT_WRITE | PROT_EXEC, 
-                                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT,
-                                               -1, 0);
-    if((char*)thunk == MAP_FAILED)
-        return NULL;
+    struct thunk *thunk = (struct thunk*)alloc_closure();
+    if(!thunk) return NULL;
     *thunk = initialize_thunk;
-    thunk->scope = calloc(1, sizeof(*thunk->scope));
-    if(unlikely(!thunk->scope))
-    {
-        goto out_free;
-    }
-    thunk->scope->args = arg;
+    thunk->scope = arg;
     thunk->call_offset = (long)block - (long)&thunk->UNWIND_OP;
     return (closure_t)thunk;
-
-    out_free:
-    munmap(thunk, sizeof(*thunk) + sizeof(thunk));
-    return (closure_t)NULL;
 }
 
 static void free_closure(closure_t closure)
 {
     struct thunk *thunk = (struct thunk*)closure;
     int err = 0;
-    free(thunk->scope);
     err = munmap((void*)closure, sizeof(*thunk) + sizeof(thunk));
     assert(err == 0);
 }
-
 
 /*
  * Stack it into a reclaim list since it could be released in the context of the closure itself.
@@ -179,7 +197,6 @@ static void free_closure(closure_t closure)
  * We cannot write to the header of the thunk for the reclaim list as that contains the closure code.
  * So cannot overwrite ourselves.
  */
-static struct thunk *reclaim_list;
 
 static void release_closure(closure_t closure)
 {
@@ -188,7 +205,7 @@ static void release_closure(closure_t closure)
     reclaim_list = thunk;
 }
 
-static void reclaim_closure(void)
+void reclaim_closures(void)
 {
     struct thunk *iter = reclaim_list;
     struct thunk *next = NULL;
@@ -202,206 +219,346 @@ static void reclaim_closure(void)
     reclaim_list = NULL;
 }
 
-static int stack_continuation(int cont, void *block, void *args)
+int open_continuation(continuation_block_t *closures, int num_closures, int flags)
 {
-    struct list_head *queue = get_continuation_queue(cont);
-    struct continuation *continuation = NULL;
-    int err = -1;
-    if(unlikely(!queue)) goto out;
-    continuation = calloc(1, sizeof(*continuation));
-    assert(continuation);
-    continuation->thunk = make_closure(block, args);
-    if(unlikely(!continuation->thunk)) goto out_free;
+    int cont;
+    int i;
+    struct continuation_list *continuation_list;
+
+    cont = get_continuation(&continuation_map);
+    if(cont < 0)
+    {
+        errno = ENFILE;
+        return -1;
+    }
+    continuation_list = get_continuation_queue(&continuation_map, cont);
+    LIST_HEAD_INIT(&continuation_list->continuations);
+    LIST_HEAD_INIT(&continuation_list->deferred_continuations);
+    continuation_list->flags = flags;
+    
+    if(unlikely(!closures || !num_closures))
+    {
+        return cont;
+    }
+    for(i = 0; i < num_closures; ++i)
+    {
+        struct continuation *continuation;
+        if(!closures[i].block) continue;
+        continuation = calloc(1, sizeof(*continuation));
+        if(!continuation) 
+        {
+            errno = ENOMEM;
+            goto out_free;
+        }
+        continuation->thunk = make_closure((void*)closures[i].block, closures[i].arg);
+        if(!continuation->thunk) 
+        {
+            errno = ENOMEM;
+            goto out_free;
+        }
+        list_add_tail(&continuation->list, &continuation_list->continuations);
+    }
+    return cont;
+
+    out_free:
+    while(!LIST_EMPTY(&continuation_list->continuations))
+    {
+        struct continuation *continuation = list_entry(continuation_list->continuations.next, 
+                                                       struct continuation, list);
+        list_del(&continuation->list);
+        free_closure(continuation->thunk);
+        free(continuation);
+    }
+
+    clear_continuation(&continuation_map, cont);
+    return -1;
+}
+
+static __inline__ struct continuation *pop_continuation(struct continuation_list *continuation_list)
+{
+    struct continuation *continuation;
+    if(LIST_EMPTY(&continuation_list->continuations))
+    {
+        if(LIST_EMPTY(&continuation_list->deferred_continuations))
+            return NULL;
+        list_splice(&continuation_list->deferred_continuations, &continuation_list->continuations);
+    }
+    if(continuation_list->flags & CONT_UNWIND)
+        continuation = list_entry(continuation_list->continuations.prev, struct continuation, list);
+    else
+        continuation = list_entry(continuation_list->continuations.next, struct continuation, list);
+    list_del(&continuation->list);
+    if(LIST_EMPTY(&continuation_list->continuations))
+    {
+        list_splice(&continuation_list->deferred_continuations, &continuation_list->continuations);
+    }
+    return continuation;
+}
+
+static int __remove_continuation(int cont, int unwind)
+{
+    struct continuation_list *continuation_list;
+    struct continuation *continuation;
+    if(unlikely(cont >= CONTINUATION_MAP_BITS))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    continuation_list = get_continuation_queue(&continuation_map, cont);
+    if(unlikely(!continuation_list)) 
+    {
+        errno = ENOENT;
+        return -1;
+    }
+    continuation = pop_continuation(continuation_list);
+    if(unlikely(!continuation)) 
+    {
+        errno = ESRCH;
+        return -1;
+    }
+    release_closure(continuation->thunk);
+    free(continuation);
     /*
-     * stack the continuation.
+     * In unwind mode, we reverse the continuation list traversal
      */
-    list_add(&continuation->list, queue);
+    if(unwind)
+    {
+        if(!(continuation_list->flags & CONT_UNWIND))
+            continuation_list->flags |= CONT_UNWIND;
+    }
+    return 0;
+}
+
+int remove_continuation(int cont)
+{
+    return __remove_continuation(cont, 0);
+}
+
+int unwind_continuation(int cont)
+{
+    return __remove_continuation(cont, 1);
+}
+
+static __inline__ struct continuation *__peek_continuation(struct continuation_list *continuation_list)
+{
+    struct continuation *continuation;
+    if(LIST_EMPTY(&continuation_list->continuations)) return NULL;
+    if(continuation_list->flags & CONT_UNWIND)
+    {
+        continuation = list_entry(continuation_list->continuations.prev, struct continuation, list);
+    }
+    else
+    {
+        continuation = list_entry(continuation_list->continuations.next, struct continuation, list);
+    }
+    return continuation;
+}
+
+/*
+ * Just run the continuation at the top of the list without de/re-queueing
+ */
+int peek_continuation(int cont)
+{
+    struct continuation_list *continuation_list;
+    struct continuation *continuation;
+    if(unlikely(cont >= CONTINUATION_MAP_BITS)) 
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    continuation_list = get_continuation_queue(&continuation_map, cont);
+    if(unlikely(!continuation_list)) 
+    {
+        errno = ENOENT;
+        return -1;
+    }
+    continuation = __peek_continuation(continuation_list);
+    if(unlikely(!continuation))
+    {
+        errno = ESRCH;
+        return -1;
+    }
+    continuation->thunk();
+    return 0;
+}
+
+int close_continuation(int cont)
+{
+    struct continuation_list *continuation_list;
+    if(unlikely(cont >= CONTINUATION_MAP_BITS)) 
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    continuation_list = get_continuation_queue(&continuation_map, cont);
+    if(unlikely(!continuation_list))
+    {
+        errno = ENOENT;
+        return -1;
+    }
+    list_splice(&continuation_list->deferred_continuations, &continuation_list->continuations);
+    while(!LIST_EMPTY(&continuation_list->continuations))
+    {
+        struct continuation *continuation = list_entry(continuation_list->continuations.next, struct continuation, list);
+        list_del(&continuation->list);
+        release_closure(continuation->thunk);
+        free(continuation);
+    }
+    clear_continuation(&continuation_map, cont);
+    return 0;
+}
+
+int play_continuation(int cont)
+{
+    struct continuation_list *continuation_list;
+    struct continuation *continuation;
+    int repeater;
+    if(unlikely(cont >= CONTINUATION_MAP_BITS))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    continuation_list = get_continuation_queue(&continuation_map, cont);
+    if(unlikely(!continuation_list))
+    {
+        errno = ENOENT;
+        return -1;
+    }
+    repeater = continuation_list->flags & CONT_REPEATER;
+    if(repeater)
+    {
+        continuation = pop_continuation(continuation_list);
+    }
+    else
+    {
+        continuation = __peek_continuation(continuation_list);
+    }
+    if(unlikely(!continuation))
+    {
+        errno = ESRCH;
+        return -1;
+    }
+    /*
+     * Add the continuation back to the end of the list if its a repeater.
+     */
+    if(repeater)
+    {
+        list_add_tail(&continuation->list, &continuation_list->continuations);
+    }
+    continuation->thunk(); /* run the continuation block*/
+    return 0;
+}
+
+/*  
+ * Advance a continuation to prepare to run the next continuation in the stack
+ */
+int advance_continuation(int cont)
+{
+    struct continuation_list *continuation_list;
+    struct list_head *head;
+    if(unlikely(cont >= CONTINUATION_MAP_BITS))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    continuation_list = get_continuation_queue(&continuation_map, cont);
+    if(unlikely(!continuation_list)) 
+    {
+        errno = ENOENT;
+        return -1;
+    }
+    if(LIST_EMPTY(&continuation_list->continuations))
+    {
+        errno = ESRCH;
+        return -1; /*nothing to advance*/
+    }
+    head = continuation_list->continuations.next;
+    list_del(head);
+    if(continuation_list->flags & CONT_REPEATER)
+    {
+        list_add_tail(head, &continuation_list->continuations);
+    }
+    else
+    {
+        list_add_tail(head, &continuation_list->deferred_continuations);
+        if(LIST_EMPTY(&continuation_list->continuations))
+        {
+            list_splice(&continuation_list->deferred_continuations, &continuation_list->continuations);
+        }
+    }
+    return 0;
+}
+
+static int __extend_continuation(int cont, continuation_block_t *closures, int num_closures, int prepend)
+{
+    struct continuation_list *continuation_list;
+    struct continuation *continuation;
+    DECLARE_LIST_HEAD(closure_list);
+    int i;
+    int err = -1;
+    if(unlikely(!closures || !num_closures))
+    {
+        errno = EINVAL;
+        goto out;
+    }
+    if(unlikely(cont >= CONTINUATION_MAP_BITS))
+    {
+        errno = EINVAL;
+        goto out;
+    }
+    continuation_list = get_continuation_queue(&continuation_map, cont);
+    if(unlikely(!continuation_list))
+    {
+        errno = ENOENT;
+        goto out;
+    }
+    for(i = 0; i < num_closures; ++i)
+    {
+        if(!closures[i].block) continue;
+        continuation = calloc(1, sizeof(*continuation));
+        if(!continuation) 
+        {
+            errno = ENOMEM;
+            goto out_free;
+        }
+        continuation->thunk = make_closure((void*)closures[i].block, closures[i].arg);
+        if(!continuation->thunk)
+        {
+            errno = ENOMEM;
+            goto out_free;
+        }
+        list_add_tail(&continuation->list, &closure_list);
+    }
+    if(prepend)
+    {
+        list_splice(&closure_list, &continuation_list->continuations);
+    }
+    else
+    {
+        list_concat(&closure_list, &continuation_list->continuations);
+    }
     err = 0;
     goto out;
 
     out_free:
-    free(continuation);
+    while(!LIST_EMPTY(&closure_list))
+    {
+        continuation = list_entry(closure_list.next, struct continuation, list);
+        list_del(&continuation->list);
+        free_closure(continuation->thunk);
+        free(continuation);
+    }
 
     out:
     return err;
 }
 
-static struct continuation *pop_continuation(int cont)
+int add_continuation(int cont, continuation_block_t *closures, int num_closures)
 {
-    struct list_head *queue = get_continuation_queue(cont);
-    struct continuation *continuation;
-    if(unlikely(!queue)) return NULL;
-    if(LIST_EMPTY(queue)) return NULL;
-    continuation = list_entry(queue->next, struct continuation, list);
-    list_del(&continuation->list);
-    if(LIST_EMPTY(queue))
-    {
-        clear_continuation(&continuation_map, cont);
-    }
-    return continuation;
+    return __extend_continuation(cont, closures, num_closures, 1);
 }
 
-static int remove_continuation(int cont)
+int append_continuation(int cont, continuation_block_t *closures, int num_closures)
 {
-    struct continuation *continuation;
-    continuation = pop_continuation(cont);
-    if(unlikely(!continuation)) return -1;
-    release_closure(continuation->thunk);
-    free(continuation);
-    return 0;
-}
-
-/*
- * Just return the continuation at the top of the list
- */
-static struct continuation *peek_continuation(int cont)
-{
-    struct list_head *queue = get_continuation_queue(cont);
-    struct continuation *continuation;
-    if(unlikely(queue == NULL)) return NULL;
-    if(LIST_EMPTY(queue)) return NULL;
-    continuation = list_entry(queue->next, struct continuation, list);
-    return continuation;
-}
-
-static int run_continuation(int cont)
-{
-    struct continuation *continuation;
-    continuation = peek_continuation(cont);
-    if(!continuation) return -1;
-    continuation->thunk(); /* run the continuation block*/
-    return 0;
-}
-
-struct continuation_scope
-{
-#define WIND (0x1)
-#define UNWIND (0x2)
-    int continuation;
-    int state;
-};
-
-static struct continuation_scope *make_scope(int continuation)
-{
-    struct continuation_scope *scope = calloc(1, sizeof(*scope));
-    assert(scope);
-    scope->continuation = continuation;
-    scope->state |= WIND;
-    return scope;
-}
-
-#define PRINT_CONTINUATION(cont) do {                                   \
-    printf("Inside continuation id [%d] with state [%d] in function [%s]\n", \
-           (cont)->continuation, (cont)->state, __FUNCTION__);          \
-} while(0)
-
-static void continuation_2(struct scope *scope)
-{
-    struct continuation_scope *cont = scope->args;
-    PRINT_CONTINUATION(cont);
-    /*
-     * unwind 
-     */
-    if(cont->state & WIND)
-    {
-        cont->state &= ~WIND;
-        cont->state |= UNWIND;
-        remove_continuation(cont->continuation);
-    }
-}
-
-static void continuation_1(struct scope *scope)
-{
-    struct continuation_scope *cont = scope->args;
-    PRINT_CONTINUATION(cont);
-    if(cont->state & WIND)
-    {
-        stack_continuation(cont->continuation, (void*)continuation_2, (void*)cont);
-    }
-    else 
-    {
-        remove_continuation(cont->continuation);
-    }
-}
-
-static void continuation_0(struct scope *scope)
-{
-    struct continuation_scope *cont = scope->args;
-    PRINT_CONTINUATION(cont);
-    if(cont->state & WIND)
-    {
-        stack_continuation(cont->continuation, (void*)continuation_1, (void*)cont);
-    }
-    else
-    {
-        remove_continuation(cont->continuation);
-        printf("Continuation unwind for [%d]\n", cont->continuation);
-        free(cont); /* last unwind*/
-    }
-}
-
-static void *continuation_player(void *unused)
-{
-    register int i;
-    for(;;)
-    {
-        int run = 0;
-        /*
-         * Walk the bitmap and run the set continuations.  
-         * Break when all are cleared.
-         */
-        for(i = 0; i < CONTINUATION_MAP_WORDS; ++i)
-        {
-            unsigned int mask = continuation_map.map[i];
-            register int j;
-            if(!mask) continue;
-            for(j = 0; j < 32; ++j)
-            {
-                if( mask & ( 1 << j) )
-                {
-                    run = 1;
-                    run_continuation((i << 5) + j);
-                }
-                
-            }
-        }
-        /*
-         * Reclaim closures if any.
-         */
-        reclaim_closure();
-        if(!run) 
-        {
-            fprintf(stderr, "All continuations have been run\n");
-            break;
-        }
-    }
-    return NULL;
-}
-
-static void continuation_test(int continuations)
-{
-    int i;
-    pthread_attr_t attr;
-    pthread_t tid;
-    init_continuation_map();
-    pthread_attr_init(&attr);
-    for(i = 0; i < continuations; ++i)
-    {
-        int c = get_continuation(&continuation_map);
-        assert(c >= 0);
-        assert(stack_continuation(c, (void*)continuation_0, make_scope(c)) == 0);
-    }
-    pthread_create(&tid, &attr, continuation_player, NULL);
-    pthread_join(tid, NULL);
-}
-
-int main(int argc, char **argv)
-{
-    int c = 10;
-    if(argc > 1)
-        c = atoi(argv[1]);
-    if(!c) c = 10;
-    if(c > CONTINUATION_MAP_BITS) c = CONTINUATION_MAP_BITS;
-    continuation_test(c);
-    return 0;
+    return __extend_continuation(cont, closures, num_closures, 0);
 }
