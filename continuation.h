@@ -14,7 +14,10 @@ typedef struct continuation_block
     void *arg;
 } continuation_block_t;
 
-int open_continuation(continuation_block_t *closures, int num_closures, int flags);
+typedef void (continuation_release_block_t)(void *arg, int last_cont);
+
+int open_continuation(continuation_block_t *closures, int num_closures, 
+                      continuation_release_block_t *release_block, int flags);
 int close_continuation(int cont);
 int remove_continuation(int cont);
 /*

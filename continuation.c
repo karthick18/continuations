@@ -49,11 +49,13 @@ struct continuation
 {
     struct list_head list;
     closure_t thunk;
+    void *scope;
 };
 
 struct continuation_list
 {
     int flags;
+    continuation_release_block_t *release_block;
     struct list_head continuations;
     struct list_head deferred_continuations;
 };
@@ -219,7 +221,8 @@ void reclaim_closures(void)
     reclaim_list = NULL;
 }
 
-int open_continuation(continuation_block_t *closures, int num_closures, int flags)
+int open_continuation(continuation_block_t *closures, int num_closures, 
+                      continuation_release_block_t *release_block, int flags)
 {
     int cont;
     int i;
@@ -235,7 +238,7 @@ int open_continuation(continuation_block_t *closures, int num_closures, int flag
     LIST_HEAD_INIT(&continuation_list->continuations);
     LIST_HEAD_INIT(&continuation_list->deferred_continuations);
     continuation_list->flags = flags;
-    
+    continuation_list->release_block = release_block;
     if(unlikely(!closures || !num_closures))
     {
         return cont;
@@ -256,6 +259,7 @@ int open_continuation(continuation_block_t *closures, int num_closures, int flag
             errno = ENOMEM;
             goto out_free;
         }
+        continuation->scope = closures[i].arg;
         list_add_tail(&continuation->list, &continuation_list->continuations);
     }
     return cont;
@@ -316,6 +320,11 @@ static int __remove_continuation(int cont, int unwind)
         errno = ESRCH;
         return -1;
     }
+    if(continuation_list->release_block)
+    {
+        continuation_list->release_block(continuation->scope, 
+                                         !!LIST_EMPTY(&continuation_list->continuations));
+    }
     release_closure(continuation->thunk);
     free(continuation);
     /*
@@ -342,7 +351,12 @@ int unwind_continuation(int cont)
 static __inline__ struct continuation *__peek_continuation(struct continuation_list *continuation_list)
 {
     struct continuation *continuation;
-    if(LIST_EMPTY(&continuation_list->continuations)) return NULL;
+    if(LIST_EMPTY(&continuation_list->continuations))
+    {
+        if(LIST_EMPTY(&continuation_list->deferred_continuations))
+            return NULL;
+        list_splice(&continuation_list->deferred_continuations, &continuation_list->continuations);
+    }
     if(continuation_list->flags & CONT_UNWIND)
     {
         continuation = list_entry(continuation_list->continuations.prev, struct continuation, list);
@@ -401,6 +415,11 @@ int close_continuation(int cont)
     {
         struct continuation *continuation = list_entry(continuation_list->continuations.next, struct continuation, list);
         list_del(&continuation->list);
+        if(continuation_list->release_block)
+        {
+            continuation_list->release_block(continuation->scope, 
+                                             !!LIST_EMPTY(&continuation_list->continuations));
+        }
         release_closure(continuation->thunk);
         free(continuation);
     }
@@ -527,6 +546,7 @@ static int __extend_continuation(int cont, continuation_block_t *closures, int n
             errno = ENOMEM;
             goto out_free;
         }
+        continuation->scope = closures[i].arg;
         list_add_tail(&continuation->list, &closure_list);
     }
     if(prepend)

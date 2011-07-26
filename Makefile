@@ -1,18 +1,21 @@
 CC := gcc
 DEBUG := -g	
-EXTRA_CFLAGS =
+EXTRA_FLAGS = #-DAPPEND_CONTINUATION
+EXTRA_CFLAGS = 
 CFLAGS = -Wall $(EXTRA_CFLAGS) $(DEBUG)
 LIBS := libcontinuation.so
 LDLIBS = -lpthread
 LDFLAGS = 
 SRCS := continuation.c
 OBJS := $(SRCS:%.c=%.o)
-TEST_BINARIES := continuation_test_1
-TEST_OBJS := continuation_test_1.o continuation_player.o
+TEST_BINARIES := continuation_test_1 continuation_test_2
+TEST_OBJS := continuation_test_1.o continuation_test_2.o continuation_player.o
+
 ifeq ($(TEST), 1)
 	TARGETS := $(TEST_BINARIES)
 	LDFLAGS += -L./. 
 	LDLIBS += -lcontinuation
+	EXTRA_CFLAGS += $(EXTRA_FLAGS)
 else
 	TARGETS := $(LIBS) tests
 	EXTRA_CFLAGS += -fPIC -shared
@@ -33,6 +36,9 @@ libcontinuation.so: $(OBJS)
 
 continuation_test_1: continuation_test_1.o continuation_player.o
 	$(CC) $(LDFLAGS) $(LDLIBS) -o $@ $^ 
+
+continuation_test_2: continuation_test_2.o continuation_player.o
+	$(CC) $(LDFLAGS) $(LDLIBS) -o $@ $^
 
 tests:
 	$(MAKE) TEST=1

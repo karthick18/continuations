@@ -52,6 +52,15 @@ static struct continuation_scope *make_scope(int continuation)
 
 #endif
 
+static void continuation_release(void *cont, int last_cont)
+{
+    if(last_cont) 
+    {
+        printf("Continuation [%d] being released\n", ((struct continuation_scope*)cont)->continuation);
+        free(cont); 
+    }
+}
+
 static void continuation_2(void *arg)
 {
     struct continuation_scope *cont = arg;
@@ -91,10 +100,7 @@ static void continuation_0(void *arg)
     }
     else
     {
-        int continuation = cont->continuation;
-        REMOVE_CONTINUATION(continuation);
-        printf("Continuation unwind for [%d]\n", continuation);
-        free(cont); /* should be last unwind for this test*/
+        REMOVE_CONTINUATION(cont->continuation);
     }
 }
 
@@ -104,7 +110,7 @@ static void continuation_test(int continuations)
     for(i = 0; i < continuations; ++i)
     {
         continuation_block_t continuation = {.block = continuation_0};
-        int c = open_continuation(NULL, 0, 0);
+        int c = open_continuation(NULL, 0, continuation_release, 0);
         assert(c >= 0);
         printf("Continuation [%d] opened\n", c);
         mark_continuation(c);
