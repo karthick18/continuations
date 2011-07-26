@@ -1,14 +1,6 @@
 /*
- * A continuation example with closure.
- * To test:
- *
- * make or make ARCH=x86 for 32 bit
- * ./continuation  
- *  would test with creating 10 continuations each stacking 3 levels of continuations before unwinding
- * ./continuation 20 
- * would test with 20 continuations
- *
- * These principles could be used to create a single threaded async request server.
+ * A continuation interface with closures.
+ * These principles could be used to create a single threaded async-only request server.
  */
 
 #if !defined (__linux__) && !defined(__APPLE__)
