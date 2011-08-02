@@ -8,8 +8,8 @@ LDLIBS = -lpthread
 LDFLAGS = 
 SRCS := continuation.c
 OBJS := $(SRCS:%.c=%.o)
-TEST_BINARIES := continuation_test_1 continuation_test_2
-TEST_OBJS := continuation_test_1.o continuation_test_2.o continuation_player.o
+TEST_BINARIES := continuation_test_1 continuation_test_2 continuation_test_3
+TEST_OBJS := continuation_test_1.o continuation_test_2.o continuation_test_3.o continuation_player.o
 
 ifeq ($(TEST), 1)
 	TARGETS := $(TEST_BINARIES)
@@ -38,6 +38,9 @@ continuation_test_1: continuation_test_1.o continuation_player.o
 	$(CC) $(LDFLAGS) $(LDLIBS) -o $@ $^ 
 
 continuation_test_2: continuation_test_2.o continuation_player.o
+	$(CC) $(LDFLAGS) $(LDLIBS) -o $@ $^
+
+continuation_test_3: continuation_test_3.o continuation_player.o
 	$(CC) $(LDFLAGS) $(LDLIBS) -o $@ $^
 
 tests:
