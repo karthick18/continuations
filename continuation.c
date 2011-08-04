@@ -270,7 +270,8 @@ int open_continuation(continuation_block_t *closures, int num_closures,
     return -1;
 }
 
-static __inline__ struct continuation *pop_continuation(struct continuation_list *continuation_list)
+static __inline__ struct continuation *pop_continuation(struct continuation_list *continuation_list, 
+                                                        int removed)
 {
     struct continuation *continuation;
     if(LIST_EMPTY(&continuation_list->continuations))
@@ -279,10 +280,15 @@ static __inline__ struct continuation *pop_continuation(struct continuation_list
             return NULL;
         list_splice(&continuation_list->deferred_continuations, &continuation_list->continuations);
     }
-    if(continuation_list->flags & CONT_UNWIND)
+    if( (continuation_list->flags & CONT_UNWIND) || 
+        (removed && (continuation_list->flags & CONT_REPEATER)))
+    {
         continuation = list_entry(continuation_list->continuations.prev, struct continuation, list);
+    }
     else
+    {
         continuation = list_entry(continuation_list->continuations.next, struct continuation, list);
+    }
     list_del(&continuation->list);
     if(LIST_EMPTY(&continuation_list->continuations))
     {
@@ -306,7 +312,7 @@ static int __remove_continuation(int cont, int unwind)
         errno = ENOENT;
         return -1;
     }
-    continuation = pop_continuation(continuation_list);
+    continuation = pop_continuation(continuation_list, 1);
     if(unlikely(!continuation)) 
     {
         errno = ESRCH;
@@ -438,7 +444,7 @@ int play_continuation(int cont)
     repeater = continuation_list->flags & CONT_REPEATER;
     if(repeater)
     {
-        continuation = pop_continuation(continuation_list);
+        continuation = pop_continuation(continuation_list, 0);
     }
     else
     {
