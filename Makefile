@@ -35,13 +35,13 @@ libcontinuation.so: $(OBJS)
 	$(CC) $(ARCH_FLAGS) $(LDFLAGS) $(DEBUG) -o $@ $^ $(LDLIBS)
 
 continuation_test_1: continuation_test_1.o continuation_player.o
-	$(CC) $(LDFLAGS) $(LDLIBS) -o $@ $^ 
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 continuation_test_2: continuation_test_2.o continuation_player.o
-	$(CC) $(LDFLAGS) $(LDLIBS) -o $@ $^
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 continuation_test_3: continuation_test_3.o continuation_player.o
-	$(CC) $(LDFLAGS) $(LDLIBS) -o $@ $^
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 tests:
 	$(MAKE) TEST=1
