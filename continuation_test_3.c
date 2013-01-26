@@ -41,8 +41,8 @@ static void setup_alarm(void)
     };
     time(&t);
     localtime_r(&t, &curtime);
-    curtime.tm_mday = 5;
-    curtime.tm_mon = 7;
+    curtime.tm_mday = 25;
+    curtime.tm_mon = 1;
     curtime.tm_sec = 0;
     curtime.tm_min = 0;
     curtime.tm_hour = 0;
@@ -77,7 +77,7 @@ static void do_bday(void *arg)
     int index = scope->cur_index;
     if(!scope->len)
     {
-        scope->arr = strdup("a" "p" " " "b" "r" "h" "a" " " "d" "v" "r" "j");
+        scope->arr = strdup("a" "p" " " "i" "t" "d" "y" "g" "o" "e" " ");
         scope->len = strlen(scope->arr);
     }
     scope->cur_index = (scope->cur_index + 1) % scope->len;
@@ -96,7 +96,7 @@ static void do_happy(void *arg)
     int index = scope->cur_index;
     if(!scope->len)
     {
-        scope->arr = strdup("h" "p" "y" " " "i" "t" "d" "y" " " "e" "a" "a");
+        scope->arr = strdup("h" "p" "y" "b" "r" "h" "a" " " "h" "s" "b");
         scope->len = strlen(scope->arr);
     }
     scope->cur_index = (scope->cur_index + 1) % scope->len;
